@@ -8,12 +8,20 @@ FROM python:3.12-slim-bookworm
 
 ARG NODE_MAJOR=22
 ARG APT_MIRROR
+ARG UV_HTTP_TIMEOUT=180
+ARG UV_HTTP_RETRIES=5
+ARG UV_DEFAULT_INDEX="https://pypi.tuna.tsinghua.edu.cn/simple"
 
 # Optionally override apt mirror for restricted networks (e.g. APT_MIRROR=mirrors.aliyun.com)
 RUN if [ -n "${APT_MIRROR}" ]; then \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
       sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null || true; \
     fi
+
+# Network can be slow/retry-prone during Docker builds; increase uv's HTTP timeout.
+ENV UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT}
+ENV UV_HTTP_RETRIES=${UV_HTTP_RETRIES}
+ENV UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX}
 
 # Install system dependencies + Node.js (provides npx for MCP servers)
 RUN apt-get update && apt-get install -y \

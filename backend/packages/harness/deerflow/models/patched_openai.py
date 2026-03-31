@@ -88,6 +88,18 @@ class PatchedChatOpenAI(ChatOpenAI):
             for (_, payload_msg), ai_msg in zip(assistant_payloads, ai_messages):
                 _restore_tool_call_signatures(payload_msg, ai_msg)
 
+        # Some OpenAI-compatible gateways reject `tool_choice="auto"` unless server-side
+        # flags are enabled:
+        #   --enable-auto-tool-choice and --tool-call-parser
+        #
+        # LangChain/OpenAI SDK may encode it either as a string ("auto") or as an object
+        # (e.g. {"type": "auto"}). Normalize and force it to a compatible value to avoid
+        # a hard 400.
+        tc = payload.get("tool_choice")
+        is_auto = tc == "auto" or (isinstance(tc, dict) and tc.get("type") == "auto")
+        if is_auto:
+            payload["tool_choice"] = "required"
+
         return payload
 
 

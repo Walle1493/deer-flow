@@ -24,6 +24,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
+
+    # Default to PatchedChatOpenAI for OpenAI ChatOpenAI models so we can apply
+    # compatibility fixes for OpenAI-compatible gateways (e.g. tool choice behavior).
+    try:
+        if model_class.__name__ == "ChatOpenAI" and model_class.__module__.startswith("langchain_openai"):
+            from deerflow.models.patched_openai import PatchedChatOpenAI
+            model_class = PatchedChatOpenAI
+    except Exception:
+        # Fall back to the resolved class if the patch can't be applied.
+        pass
     model_settings_from_config = model_config.model_dump(
         exclude_none=True,
         exclude={
