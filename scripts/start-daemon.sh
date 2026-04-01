@@ -8,6 +8,9 @@
 # Must be run from the repo root directory.
 
 set -e
+# Ensure user-local tools (e.g. uv) are available when launched non-interactively.
+export PATH="$HOME/.local/bin:$PATH"
+export PATH="/Users/bruce/Project/deer-flow/backend/.venv/bin:$PATH"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
