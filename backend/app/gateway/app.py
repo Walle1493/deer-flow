@@ -1,4 +1,7 @@
+import asyncio
 import logging
+import os
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -28,6 +31,56 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# IM channels (Feishu, etc.) run on a dedicated thread with its own asyncio loop.
+# Never use asyncio.run(start_channel_service()) there: asyncio.run() closes the loop when
+# start() returns, which cancels ChannelManager._dispatch_loop and breaks inbound handling.
+_channel_worker_thread: threading.Thread | None = None
+_channel_worker_stop_event: threading.Event | None = None
+
+
+def _channel_worker_main(stop_event: threading.Event) -> None:
+    """Run ChannelService on a long-lived event loop (separate from Uvicorn)."""
+    import asyncio as aio
+
+    logger.info(
+        "[feishu-worker] IM channel worker thread starting (pid=%s, thread=%s)",
+        os.getpid(),
+        threading.current_thread().name,
+    )
+    loop = aio.new_event_loop()
+    aio.set_event_loop(loop)
+
+    async def _runner() -> None:
+        from app.channels.service import get_channel_service, start_channel_service, stop_channel_service
+
+        await start_channel_service()
+        svc = get_channel_service()
+        logger.info("Channel service started: %s", svc.get_status() if svc else {})
+        await aio.to_thread(stop_event.wait)
+        await stop_channel_service()
+
+    try:
+        loop.run_until_complete(_runner())
+    except Exception:
+        logger.exception("Channel worker loop failed")
+    finally:
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except Exception:
+            logger.exception("Error closing channel worker event loop")
+
+
+def _spawn_channel_worker(stop_event: threading.Event) -> threading.Thread:
+    t = threading.Thread(
+        target=_channel_worker_main,
+        args=(stop_event,),
+        name="deerflow-channels",
+        daemon=True,
+    )
+    t.start()
+    return t
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -49,24 +102,55 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 2. Gateway and LangGraph Server are separate processes with independent caches
     # MCP tools are lazily initialized in LangGraph Server when first needed
 
-    # Start IM channel service if any channels are configured
+    # IM channels can block the event loop for a long time (e.g. Feishu handshake). If we
+    # asyncio.create_task() them and then yield, the task may run before Starlette sends
+    # lifespan.startup.complete — blocking the loop and delaying listen(). Schedule the
+    # task on the next loop iteration so startup.complete and uvicorn bind happen first.
+    channel_task: asyncio.Task[None] | None = None
+    global _channel_worker_thread, _channel_worker_stop_event
     try:
-        from app.channels.service import start_channel_service
 
-        channel_service = await start_channel_service()
-        logger.info("Channel service started: %s", channel_service.get_status())
+        async def _start_channels() -> None:
+            global _channel_worker_thread, _channel_worker_stop_event
+            try:
+                _channel_worker_stop_event = threading.Event()
+                _channel_worker_thread = await asyncio.to_thread(
+                    _spawn_channel_worker,
+                    _channel_worker_stop_event,
+                )
+            except Exception:
+                logger.exception("No IM channels configured or channel service failed to start")
+
+        loop = asyncio.get_running_loop()
+
+        def _schedule_channel_start() -> None:
+            nonlocal channel_task
+            channel_task = asyncio.create_task(_start_channels())
+
+        loop.call_soon(_schedule_channel_start)
     except Exception:
-        logger.exception("No IM channels configured or channel service failed to start")
+        logger.exception("Failed to schedule IM channel service startup")
 
     yield
 
-    # Stop channel service on shutdown
-    try:
-        from app.channels.service import stop_channel_service
+    worker = _channel_worker_thread
+    if _channel_worker_stop_event is not None:
+        _channel_worker_stop_event.set()
+    if worker is not None and worker.is_alive():
 
-        await stop_channel_service()
-    except Exception:
-        logger.exception("Failed to stop channel service")
+        def _join_worker() -> None:
+            worker.join(timeout=60.0)
+
+        await asyncio.to_thread(_join_worker)
+    _channel_worker_thread = None
+    _channel_worker_stop_event = None
+
+    if channel_task is not None and not channel_task.done():
+        channel_task.cancel()
+        try:
+            await channel_task
+        except asyncio.CancelledError:
+            pass
     logger.info("Shutting down API Gateway")
 
 

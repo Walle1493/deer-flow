@@ -264,12 +264,20 @@ tool_groups:
 
 tools:
   # Web search tool (uses DuckDuckGo, no API key required)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.ddg_search.tools:web_search_tool
+  #   max_results: 5
+
+  # Web search: Tavily first, then DuckDuckGo if Tavily fails (quota, network, invalid key, etc.)
   - name: web_search
     group: web
-    use: deerflow.community.ddg_search.tools:web_search_tool
+    use: deerflow.community.web_search_fallback.tools:web_search_tool
     max_results: 5
+    api_key: $TAVILY_API_KEY
+  # Optional: search_primary: ddg  # skip Tavily, use only DuckDuckGo
 
-  # Web search tool (requires Tavily API key)
+  # Web search tool (Tavily only, no DuckDuckGo fallback)
   # - name: web_search
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool

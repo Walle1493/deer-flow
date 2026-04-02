@@ -15,6 +15,94 @@ export PATH="/Users/bruce/Project/deer-flow/backend/.venv/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Optional: Start Windows model forwarder (WSL2 mirrored networking) ────────
+maybe_start_windows_forwarder() {
+    if ! grep -qi microsoft /proc/version 2>/dev/null; then
+        return 0
+    fi
+
+    local port="${DEERFLOW_WIN_FORWARDER_PORT:-55001}"
+    local target_base="${DEERFLOW_WIN_FORWARDER_TARGET_BASE:-http://10.131.12.157:50001}"
+    local ps_file="$REPO_ROOT/scripts/start-win-forwarder.ps1"
+
+    local want="auto"
+    if [ -n "${DEERFLOW_WIN_FORWARDER:-}" ]; then
+        want="$DEERFLOW_WIN_FORWARDER"
+    fi
+
+    if [ "$want" = "auto" ]; then
+        if grep -qE 'base_url:\s*http://127\.0\.0\.1:55001/v1' "$REPO_ROOT/config.yaml" 2>/dev/null; then
+            want="1"
+        else
+            want="0"
+        fi
+    fi
+
+    if [ "$want" != "1" ]; then
+        return 0
+    fi
+
+    if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+        return 0
+    fi
+
+    if command -v powershell.exe >/dev/null 2>&1 && [ -f "$ps_file" ]; then
+        echo "Starting Windows model forwarder (localhost:$port -> $target_base)..."
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps_file")" -TargetBase "$target_base" -ListenPort "$port" >/dev/null 2>&1 || true
+        ./scripts/wait-for-port.sh "$port" 8 "Windows Forwarder" >/dev/null 2>&1 || true
+    fi
+}
+
+# ── Optional: Ensure proxy env for web tools ─────────────────────────────────
+maybe_set_proxy_env() {
+    if [ -n "${HTTP_PROXY:-}" ]; then
+        local hp="${HTTP_PROXY#http://}"
+        hp="${hp#https://}"
+        local host="${hp%%:*}"
+        local port="${hp##*:}"
+        if [ -n "$host" ] && [ -n "$port" ] && (exec 3<>/dev/tcp/"$host"/"$port") 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    local http_host=""
+    local socks_host=""
+
+    if (exec 3<>/dev/tcp/127.0.0.1/10809) 2>/dev/null; then
+        http_host="127.0.0.1"
+    fi
+    if (exec 3<>/dev/tcp/127.0.0.1/10808) 2>/dev/null; then
+        socks_host="127.0.0.1"
+    fi
+
+    if [ -z "$http_host" ] || [ -z "$socks_host" ]; then
+        if command -v ip >/dev/null 2>&1; then
+            local gw
+            gw="$(ip route show default 2>/dev/null | awk '{print $3}')"
+            if [ -z "$http_host" ] && (exec 3<>/dev/tcp/"$gw"/10809) 2>/dev/null; then
+                http_host="$gw"
+            fi
+            if [ -z "$socks_host" ] && (exec 3<>/dev/tcp/"$gw"/10808) 2>/dev/null; then
+                socks_host="$gw"
+            fi
+        fi
+    fi
+
+    if [ -n "$http_host" ]; then
+        export HTTP_PROXY="http://${http_host}:10809"
+        export HTTPS_PROXY="http://${http_host}:10809"
+        export http_proxy="$HTTP_PROXY"
+        export https_proxy="$HTTPS_PROXY"
+    fi
+    if [ -n "$socks_host" ]; then
+        export ALL_PROXY="socks5h://${socks_host}:10808"
+        export all_proxy="$ALL_PROXY"
+    fi
+
+    export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+    export no_proxy="${no_proxy:-$NO_PROXY}"
+}
+
 # ── Stop existing services ────────────────────────────────────────────────────
 
 echo "Stopping existing services if any..."
@@ -75,6 +163,9 @@ trap cleanup_on_failure INT TERM
 
 mkdir -p logs
 
+maybe_start_windows_forwarder
+maybe_set_proxy_env
+
 echo "Starting LangGraph server..."
 nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
@@ -90,8 +181,8 @@ nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-nohup sh -c 'cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1' &
-./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
+nohup sh -c 'cd backend && PYTHONUNBUFFERED=1 PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 > ../logs/gateway.log 2>&1' &
+./scripts/wait-for-port.sh 8001 90 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
     echo ""

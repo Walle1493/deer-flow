@@ -9,6 +9,131 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Optional: Start Windows model forwarder (WSL2 mirrored networking) ────────
+#
+# If your model base_url points to http://127.0.0.1:55001/v1, DeerFlow expects a
+# Windows-side forwarder that can reach the intranet model endpoint (10.x).
+#
+# Controls:
+#   DEERFLOW_WIN_FORWARDER=1|0        (default: auto-detect from config.yaml)
+#   DEERFLOW_WIN_FORWARDER_PORT=55001
+#   DEERFLOW_WIN_FORWARDER_TARGET_BASE=http://10.131.12.157:50001
+#
+maybe_start_windows_forwarder() {
+    # Only relevant inside WSL.
+    if ! grep -qi microsoft /proc/version 2>/dev/null; then
+        return 0
+    fi
+
+    local port="${DEERFLOW_WIN_FORWARDER_PORT:-55001}"
+    local target_base="${DEERFLOW_WIN_FORWARDER_TARGET_BASE:-http://10.131.12.157:50001}"
+    local ps_file="$REPO_ROOT/scripts/start-win-forwarder.ps1"
+
+    local want="auto"
+    if [ -n "${DEERFLOW_WIN_FORWARDER:-}" ]; then
+        want="$DEERFLOW_WIN_FORWARDER"
+    fi
+
+    if [ "$want" = "auto" ]; then
+        if grep -qE 'base_url:\s*http://127\.0\.0\.1:55001/v1' "$REPO_ROOT/config.yaml" 2>/dev/null; then
+            want="1"
+        else
+            want="0"
+        fi
+    fi
+
+    if [ "$want" != "1" ]; then
+        return 0
+    fi
+
+    # Already listening? (fast path)
+    if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+        return 0
+    fi
+
+    if ! command -v powershell.exe >/dev/null 2>&1; then
+        echo "⚠ Windows forwarder requested but powershell.exe not found in WSL PATH."
+        return 0
+    fi
+    if [ ! -f "$ps_file" ]; then
+        echo "⚠ Windows forwarder requested but $ps_file not found."
+        return 0
+    fi
+
+    echo "Starting Windows model forwarder (localhost:$port -> $target_base)..."
+    # Note: This does not require admin rights; firewall rule may.
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ps_file")" -TargetBase "$target_base" -ListenPort "$port" >/dev/null 2>&1 || true
+
+    # Wait briefly for it to come up.
+    ./scripts/wait-for-port.sh "$port" 8 "Windows Forwarder" >/dev/null 2>&1 || {
+        echo "⚠ Windows forwarder did not become ready on port $port."
+        echo "  Try running manually on Windows:"
+        echo "    powershell -ExecutionPolicy Bypass -File $(wslpath -w "$ps_file")"
+    }
+}
+
+# ── Optional: Ensure proxy env for web tools ─────────────────────────────────
+#
+# Tavily/Jina/Feishu need outbound Internet. In WSL2 mirrored networking, Windows
+# proxy ports are reachable at 127.0.0.1 (not the default gateway). In classic
+# NAT mode, you may need to use the gateway IP. This function sets HTTP(S)_PROXY
+# only if a proxy is detected; it won't override explicit user settings.
+maybe_set_proxy_env() {
+    # If user already set a proxy, keep it only if it's reachable.
+    # (In mirrored networking, the correct proxy host is often 127.0.0.1, but older
+    # configs may point to the default gateway and become unreachable.)
+    if [ -n "${HTTP_PROXY:-}" ]; then
+        # Parse http://host:port
+        local hp="${HTTP_PROXY#http://}"
+        hp="${hp#https://}"
+        local host="${hp%%:*}"
+        local port="${hp##*:}"
+        if [ -n "$host" ] && [ -n "$port" ] && (exec 3<>/dev/tcp/"$host"/"$port") 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    local http_host=""
+    local socks_host=""
+
+    # Prefer localhost (mirrored networking / port-mapped proxy).
+    if (exec 3<>/dev/tcp/127.0.0.1/10809) 2>/dev/null; then
+        http_host="127.0.0.1"
+    fi
+    if (exec 3<>/dev/tcp/127.0.0.1/10808) 2>/dev/null; then
+        socks_host="127.0.0.1"
+    fi
+
+    # Fallback: default gateway (classic WSL2 NAT).
+    if [ -z "$http_host" ] || [ -z "$socks_host" ]; then
+        if command -v ip >/dev/null 2>&1; then
+            local gw
+            gw="$(ip route show default 2>/dev/null | awk '{print $3}')"
+            if [ -z "$http_host" ] && (exec 3<>/dev/tcp/"$gw"/10809) 2>/dev/null; then
+                http_host="$gw"
+            fi
+            if [ -z "$socks_host" ] && (exec 3<>/dev/tcp/"$gw"/10808) 2>/dev/null; then
+                socks_host="$gw"
+            fi
+        fi
+    fi
+
+    if [ -n "$http_host" ]; then
+        export HTTP_PROXY="http://${http_host}:10809"
+        export HTTPS_PROXY="http://${http_host}:10809"
+        export http_proxy="$HTTP_PROXY"
+        export https_proxy="$HTTPS_PROXY"
+    fi
+    if [ -n "$socks_host" ]; then
+        export ALL_PROXY="socks5h://${socks_host}:10808"
+        export all_proxy="$ALL_PROXY"
+    fi
+
+    # Keep intranet and localhost direct.
+    export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
+    export no_proxy="${no_proxy:-$NO_PROXY}"
+}
+
 # ── Load environment variables from .env ──────────────────────────────────────
 if [ -f "$REPO_ROOT/.env" ]; then
     set -a
@@ -120,6 +245,9 @@ trap cleanup INT TERM
 
 mkdir -p logs
 
+maybe_start_windows_forwarder
+maybe_set_proxy_env
+
 if $DEV_MODE; then
     LANGGRAPH_EXTRA_FLAGS="--no-reload"
     GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='sandbox/' --reload-exclude='.deer-flow/'"
@@ -145,8 +273,8 @@ LANGGRAPH_LOG_LEVEL="${LANGGRAPH_LOG_LEVEL:-${CONFIG_LOG_LEVEL:-info}}"
 echo "✓ LangGraph server started on localhost:2024"
 
 echo "Starting Gateway API..."
-(cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
-./scripts/wait-for-port.sh 8001 30 "Gateway API" || {
+(cd backend && PYTHONUNBUFFERED=1 PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1) &
+./scripts/wait-for-port.sh 8001 90 "Gateway API" || {
     echo "✗ Gateway API failed to start. Last log output:"
     tail -60 logs/gateway.log
     echo ""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from typing import Any
 
@@ -12,6 +13,9 @@ from app.channels.base import Channel
 from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+
+# Strip Feishu <at>...</at> tags so "only @bot" messages are not dropped as empty.
+_AT_TAGS = re.compile(r"<at[^>]*>.*?</at>", re.DOTALL)
 
 
 class FeishuChannel(Channel):
@@ -31,6 +35,21 @@ class FeishuChannel(Channel):
         4. Bot replies in thread with the result
         5. Bot adds "DONE" emoji reaction to the original message
     """
+
+    @staticmethod
+    def _noop_ws_subscription_event(_event: object) -> None:
+        """Consume subscribed Feishu events we do not handle in DeerFlow.
+
+        The open platform often enables multiple IM subscriptions; the SDK raises
+        if an inbound ``event_type`` has no registered processor.  Typical extras:
+        bot entering P2P chat, message read receipts, reactions (including our own
+        OK/DONE reactions).
+        """
+
+    @staticmethod
+    def _register_ws_event_builder(builder: Any, method_name: str, handler: Any) -> Any:
+        reg = getattr(builder, method_name, None)
+        return reg(handler) if callable(reg) else builder
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="feishu", bus=bus, config=config)
@@ -141,7 +160,50 @@ class FeishuChannel(Channel):
             # thread's uvloop.
             _ws_client_mod.loop = loop
 
-            event_handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(self._on_message).build()
+            enc = (self.config.get("encrypt_key") or self.config.get("encryption_key") or "").strip()
+            vtoken = (self.config.get("verification_token") or "").strip()
+            noop = FeishuChannel._noop_ws_subscription_event
+            builder = lark.EventDispatcherHandler.builder(enc, vtoken).register_p2_im_message_receive_v1(self._on_message)
+            # Optional: only present in newer lark-oapi versions — avoids "processor not found" noise.
+            builder = FeishuChannel._register_ws_event_builder(
+                builder, "register_p2_im_message_reaction_created_v1", noop
+            )
+            builder = FeishuChannel._register_ws_event_builder(
+                builder, "register_p2_im_chat_access_event_bot_p2p_chat_entered_v1", noop
+            )
+            builder = FeishuChannel._register_ws_event_builder(
+                builder, "register_p2_im_message_message_read_v1", noop
+            )
+            event_handler = builder.build()
+            # Log every raw WS payload before SDK routing (detect missing / mismatched subscriptions).
+            _orig_dispatch = getattr(event_handler, "do_without_validation", None)
+            if callable(_orig_dispatch):
+
+                def _log_and_dispatch(payload: bytes):
+                    try:
+                        data = json.loads(payload.decode("utf-8"))
+                        hdr = data.get("header") or {}
+                        logger.info(
+                            "[feishu] ws inbound event_type=%s tenant_key=%s",
+                            hdr.get("event_type"),
+                            hdr.get("tenant_key"),
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[feishu] ws inbound non-json payload len=%d",
+                            len(payload),
+                            exc_info=True,
+                        )
+                    try:
+                        return _orig_dispatch(payload)
+                    except Exception:
+                        logger.exception(
+                            "[feishu] event dispatch failed (check encrypt_key / subscription / handler version)"
+                        )
+                        raise
+
+                event_handler.do_without_validation = _log_and_dispatch  # type: ignore[method-assign]
+
             ws_client = lark.ws.Client(
                 app_id=app_id,
                 app_secret=app_secret,
@@ -266,6 +328,19 @@ class FeishuChannel(Channel):
             raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
         return response.data.file_key
 
+    @staticmethod
+    def _raise_if_feishu_response_failed(response: Any, operation: str) -> None:
+        """Log and raise when a Feishu HTTP API call returns success=false (SDK often does not throw)."""
+        if response is None:
+            return
+        success_fn = getattr(response, "success", None)
+        if not callable(success_fn) or success_fn():
+            return
+        code = getattr(response, "code", None)
+        msg = getattr(response, "msg", None)
+        logger.error("[Feishu] API %s failed: code=%s msg=%s", operation, code, msg)
+        raise RuntimeError(f"Feishu {operation} failed: code={code}, msg={msg}")
+
     # -- message formatting ------------------------------------------------
 
     @staticmethod
@@ -302,6 +377,7 @@ class FeishuChannel(Channel):
         content = self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).reply_in_thread(True).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
+        self._raise_if_feishu_response_failed(response, "message.reply")
         response_data = getattr(response, "data", None)
         return getattr(response_data, "message_id", None)
 
@@ -312,7 +388,8 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._CreateMessageRequest.builder().receive_id_type("chat_id").request_body(self._CreateMessageRequestBody.builder().receive_id(chat_id).msg_type("interactive").content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        self._raise_if_feishu_response_failed(response, "message.create")
 
     async def _update_card(self, message_id: str, text: str) -> None:
         """Patch an existing card message in place."""
@@ -321,7 +398,8 @@ class FeishuChannel(Channel):
 
         content = self._build_card_content(text)
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
-        await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
+        self._raise_if_feishu_response_failed(response, "message.patch")
 
     def _track_background_task(self, task: asyncio.Task, *, name: str, msg_id: str) -> None:
         """Keep a strong reference to fire-and-forget tasks and surface errors."""
@@ -457,18 +535,45 @@ class FeishuChannel(Channel):
     def _on_message(self, event) -> None:
         """Called by lark-oapi when a message is received (runs in lark thread)."""
         try:
-            logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
+            # Lowercase [feishu] prefix so `grep feishu gateway.log` always finds traffic.
+            logger.info("[feishu] raw event received: type=%s", type(event).__name__)
+            if not getattr(event, "event", None) or not getattr(event.event, "message", None):
+                logger.warning("[feishu] event missing .event.message, skipping")
+                return
             message = event.event.message
+            sender = getattr(event.event, "sender", None)
+
             chat_id = message.chat_id
             msg_id = message.message_id
-            sender_id = event.event.sender.sender_id.open_id
+            sender_uid = getattr(sender, "sender_id", None) if sender else None
+            sender_id = ""
+            if sender_uid is not None:
+                sender_id = (
+                    sender_uid.open_id or sender_uid.union_id or sender_uid.user_id or ""
+                )
 
             # root_id is set when the message is a reply within a Feishu thread.
             # Use it as topic_id so all replies share the same DeerFlow thread.
             root_id = getattr(message, "root_id", None) or None
 
+            if not message.content:
+                logger.warning(
+                    "[feishu] empty message.content (message_type=%s msg_id=%s)",
+                    getattr(message, "message_type", None),
+                    msg_id,
+                )
+                return
+
             # Parse message content
-            content = json.loads(message.content)
+            try:
+                content = json.loads(message.content)
+            except json.JSONDecodeError:
+                logger.exception(
+                    "[feishu] invalid JSON in message.content (message_type=%s): %r",
+                    getattr(message, "message_type", None),
+                    (message.content or "")[:500],
+                )
+                return
 
             if "text" in content:
                 # Handle plain text messages
@@ -494,10 +599,15 @@ class FeishuChannel(Channel):
                 text = "\n\n".join(text_paragraphs)
             else:
                 text = ""
-            text = text.strip()
+                logger.info(
+                    "[feishu] non-text payload keys=%s message_type=%s",
+                    list(content.keys()),
+                    getattr(message, "message_type", None),
+                )
+            text = _AT_TAGS.sub("", text).strip()
 
             logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
+                "[feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, sender=%s, text=%r",
                 chat_id,
                 msg_id,
                 root_id,
@@ -506,7 +616,10 @@ class FeishuChannel(Channel):
             )
 
             if not text:
-                logger.info("[Feishu] empty text, ignoring message")
+                logger.info(
+                    "[feishu] empty text after strip (message_type=%s); send real text or /help",
+                    getattr(message, "message_type", None),
+                )
                 return
 
             # Check if it's a command
@@ -530,10 +643,10 @@ class FeishuChannel(Channel):
 
             # Schedule on the async event loop
             if self._main_loop and self._main_loop.is_running():
-                logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
+                logger.info("[feishu] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
                 fut = asyncio.run_coroutine_threadsafe(self._prepare_inbound(msg_id, inbound), self._main_loop)
                 fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
             else:
-                logger.warning("[Feishu] main loop not running, cannot publish inbound message")
+                logger.warning("[feishu] main loop not running, cannot publish inbound message")
         except Exception:
-            logger.exception("[Feishu] error processing message")
+            logger.exception("[feishu] error processing message")

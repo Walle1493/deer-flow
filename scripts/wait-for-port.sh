@@ -21,6 +21,11 @@ elapsed=0
 interval=1
 
 is_port_listening() {
+    # 1) Bash /dev/tcp — reliable for 127.0.0.1, no HTTP(S)_PROXY side effects.
+    if (exec 3<>/dev/tcp/127.0.0.1/"$PORT") 2>/dev/null; then
+        return 0
+    fi
+
     if command -v lsof >/dev/null 2>&1; then
         if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
             return 0
@@ -29,6 +34,10 @@ is_port_listening() {
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
+            return 0
+        fi
+        # Filter syntax differs across iproute2 builds; fall back to parsing full table.
+        if ss -ltn 2>/dev/null | grep -E ":${PORT}([[:space:]]|$)|\\]:${PORT}([[:space:]]|$)" | grep -q .; then
             return 0
         fi
     fi
