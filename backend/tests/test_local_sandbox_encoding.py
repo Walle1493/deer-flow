@@ -86,6 +86,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
         return SimpleNamespace(stdout="ok", stderr="", returncode=0)
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"WIN_TEST": "1"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
@@ -105,6 +106,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": {"WIN_TEST": "1"},
             },
         )
     ]
@@ -118,6 +120,7 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
         return SimpleNamespace(stdout="ok", stderr="", returncode=0)
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"WIN_TEST": "1"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
@@ -132,6 +135,7 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": {"WIN_TEST": "1"},
             },
         )
     ]
@@ -145,6 +149,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
         return SimpleNamespace(stdout="ok", stderr="", returncode=0)
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"WIN_TEST": "1"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
@@ -159,6 +164,24 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
                 "capture_output": True,
                 "text": True,
                 "timeout": 600,
+                "env": {"WIN_TEST": "1"},
             },
         )
     ]
+
+
+def test_execute_command_merges_extra_env_into_process_environment(monkeypatch):
+    calls: list[dict] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(local_sandbox.os, "environ", {"BASE": "1"})
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    LocalSandbox("t", extra_env={"EXTRA": "2", "BASE": "override"}).execute_command("true")
+
+    assert len(calls) == 1
+    assert calls[0]["env"]["BASE"] == "override"
+    assert calls[0]["env"]["EXTRA"] == "2"

@@ -40,6 +40,7 @@ coverage/
 # npx skills / local agent skill installs (machine-specific; do not commit)
 .agents/
 .agent/
+skills-lock.json
 skills/custom/*
 logs/
 log/
@@ -57,3 +58,6 @@ web/
 # Deployment artifacts
 backend/Dockerfile.langgraph
 config.yaml.bak
+
+# nohup / background process logs
+nohup.out

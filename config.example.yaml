@@ -365,6 +365,14 @@ sandbox:
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.
   allow_host_bash: false
+  # Optional: inject env vars into every host bash subprocess (LocalSandbox only).
+  # Values starting with $ are read from the host environment (same as AIO sandbox).
+  # If config/agent-browser.json exists (preferred), or legacy agent-browser.json next to
+  # config.yaml, DeerFlow sets AGENT_BROWSER_CONFIG so agent-browser picks up headed mode
+  # even when the shell cwd is the thread workspace.
+  # environment:
+  #   AGENT_BROWSER_HEADED: "1"
+  #   CUSTOM_VAR: $HOST_CUSTOM_VAR
 
 # Option 2: Container-based AIO Sandbox
 # Executes commands in isolated containers (Docker or Apple Container)

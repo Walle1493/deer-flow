@@ -39,7 +39,12 @@ class LocalSandbox(Sandbox):
 
         return None
 
-    def __init__(self, id: str, path_mappings: dict[str, str] | None = None):
+    def __init__(
+        self,
+        id: str,
+        path_mappings: dict[str, str] | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
         """
         Initialize local sandbox with optional path mappings.
 
@@ -47,9 +52,11 @@ class LocalSandbox(Sandbox):
             id: Sandbox identifier
             path_mappings: Dictionary mapping container paths to local paths
                           Example: {"/mnt/skills": "/absolute/path/to/skills"}
+            extra_env: Merged into the process environment for execute_command (host bash).
         """
         super().__init__(id)
         self.path_mappings = path_mappings or {}
+        self._extra_env = extra_env or {}
 
     def _resolve_path(self, path: str) -> str:
         """
@@ -196,6 +203,8 @@ class LocalSandbox(Sandbox):
         # Resolve container paths in command before execution
         resolved_command = self._resolve_paths_in_command(command)
         shell = self._get_shell()
+        env = os.environ.copy()
+        env.update(self._extra_env)
 
         if os.name == "nt":
             if self._is_powershell(shell):
@@ -211,6 +220,7 @@ class LocalSandbox(Sandbox):
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=env,
             )
         else:
             result = subprocess.run(
@@ -220,6 +230,7 @@ class LocalSandbox(Sandbox):
                 capture_output=True,
                 text=True,
                 timeout=600,
+                env=env,
             )
         output = result.stdout
         if result.stderr:
