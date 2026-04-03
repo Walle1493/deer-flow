@@ -37,6 +37,9 @@ coverage.xml
 coverage/
 .deer-flow/
 .claude/
+# npx skills / local agent skill installs (machine-specific; do not commit)
+.agents/
+.agent/
 skills/custom/*
 logs/
 log/
