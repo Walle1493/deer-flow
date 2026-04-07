@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+import json
 from typing import override
 
 from langchain.agents import AgentState
@@ -58,7 +59,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
-        options = args.get("options", [])
+        options = self._normalize_options(args.get("options"))
 
         # Type-specific icons
         type_icons = {
@@ -90,6 +91,49 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 message_parts.append(f"  {i}. {option}")
 
         return "\n".join(message_parts)
+
+    def _normalize_options(self, raw: object) -> list[str]:
+        """Normalize clarification options into a list of strings.
+
+        Models sometimes pass `options` as a JSON-encoded string (e.g. '["A","B"]')
+        or as a single plain string. If we iterate a raw string directly, it will
+        be treated as characters and rendered as 1-char-per-line numbered items.
+        """
+        if raw is None:
+            return []
+
+        if isinstance(raw, list):
+            out: list[str] = []
+            for item in raw:
+                if isinstance(item, str):
+                    s = item.strip()
+                    if s:
+                        out.append(s)
+            return out
+
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return []
+            # Try JSON array-of-strings first
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    out: list[str] = []
+                    for item in parsed:
+                        if isinstance(item, str):
+                            item_s = item.strip()
+                            if item_s:
+                                out.append(item_s)
+                    return out
+            except Exception:
+                pass
+
+            # Fallback: treat as a single option, not characters
+            return [s]
+
+        # Unknown type: don't render options
+        return []
 
     def _handle_clarification(self, request: ToolCallRequest) -> Command:
         """Handle clarification request and return command to interrupt execution.
