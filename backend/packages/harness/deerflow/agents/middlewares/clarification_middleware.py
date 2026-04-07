@@ -1,5 +1,6 @@
 """Middleware for intercepting clarification requests and presenting them to the user."""
 
+import json
 import logging
 from collections.abc import Callable
 from typing import override
@@ -46,6 +47,46 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         """
         return any("\u4e00" <= char <= "\u9fff" for char in text)
 
+    def _normalize_options(self, options_raw) -> list[str]:
+        """Normalize tool-call `options` into a list[str].
+
+        The model sometimes sends `options` as a JSON string (e.g. '["A","B"]')
+        or a plain string. Iterating over a string would enumerate characters,
+        causing the "one character per line" numbered list bug.
+        """
+        if options_raw is None:
+            return []
+
+        if isinstance(options_raw, list | tuple):
+            out: list[str] = []
+            for opt in options_raw:
+                if opt is None:
+                    continue
+                if isinstance(opt, str):
+                    s = opt.strip()
+                else:
+                    s = str(opt).strip()
+                if s:
+                    out.append(s)
+            return out
+
+        if isinstance(options_raw, str):
+            s = options_raw.strip()
+            if not s:
+                return []
+            # If it's JSON, try to parse into a list.
+            try:
+                parsed = json.loads(s)
+            except Exception:
+                return [s]
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+            # Not a list (dict/number/etc.) — treat as a single option.
+            return [s]
+
+        # Unknown types: ignore to avoid surprising rendering.
+        return []
+
     def _format_clarification_message(self, args: dict) -> str:
         """Format the clarification arguments into a user-friendly message.
 
@@ -58,7 +99,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         question = args.get("question", "")
         clarification_type = args.get("clarification_type", "missing_info")
         context = args.get("context")
-        options = args.get("options", [])
+        options = self._normalize_options(args.get("options"))
 
         # Type-specific icons
         type_icons = {
