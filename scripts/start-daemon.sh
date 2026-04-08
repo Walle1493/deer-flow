@@ -15,6 +15,16 @@ export PATH="/Users/bruce/Project/deer-flow/backend/.venv/bin:$PATH"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# ── Load environment variables from .env ──────────────────────────────────────
+# Daemon mode runs non-interactively, so we must explicitly source .env
+# to make $VARS available for config.yaml substitution (e.g. sandbox.environment).
+if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
 # ── Stop existing services ────────────────────────────────────────────────────
 
 echo "Stopping existing services if any..."
