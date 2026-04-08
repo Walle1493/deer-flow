@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "elevenlabs-tts": {
+      "source": "inferen-sh/skills",
+      "sourceType": "github",
+      "computedHash": "07f86f131f37b7e7297584eee7386ec58c7bc39f286e3b8c3ecb6814a2d363fd"
+    },
+    "films-search": {
+      "source": "netease-youdao/lobsterai",
+      "sourceType": "github",
+      "computedHash": "63d5296fddbf298ac721c17b7fca1d41e92e9aa58b9d07a2f9b87d9a23cdbc41"
+    }
+  }
+}
