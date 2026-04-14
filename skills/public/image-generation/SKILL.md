@@ -1,6 +1,12 @@
 ---
 name: image-generation
-description: Use this skill when the user requests to generate, create, imagine, or visualize images including characters, scenes, products, or any visual content. Supports structured prompts and reference images for guided generation.
+description: >
+  Sandbox-only workflow: run Python script `skills/public/image-generation/scripts/generate.py` with
+  JSON prompt files under `/mnt/user-data/workspace/` and optional reference images. Use when that
+  exact pipeline is required (e.g. PPT/slide image batches, reference-image-guided generation).
+  Do NOT use for routine “生成图片 / 文生图 / 画一张图” if the deployment provides the **z-image**
+  custom skill (HTTP `/api/v1/generate`) — use **z-image** instead. Disabled by default in many
+  setups via `extensions_config.json` when z-image is primary.
 ---
 
 # Image Generation Skill

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -12,6 +13,7 @@ from typing import Any
 
 from langgraph_sdk.errors import ConflictError
 
+from app.channels.feishu_url_images import append_feishu_image_attachments_from_text
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -127,6 +129,63 @@ def _extract_response_text(result: dict | list) -> str:
     return ""
 
 
+def _collect_text_since_last_human_for_url_scan(result: dict | list | None) -> str:
+    """Concatenate ai + tool string contents after the last human message.
+
+    Used for Feishu auto image fetch: ``image_url`` often appears only in bash/tool
+    output while the last ai message is a short acknowledgment without the URL.
+    """
+    if result is None:
+        return ""
+    if isinstance(result, list):
+        messages = result
+    elif isinstance(result, dict):
+        messages = result.get("messages", [])
+    else:
+        return ""
+
+    last_human_idx = -1
+    for i, msg in enumerate(messages):
+        if isinstance(msg, dict) and msg.get("type") == "human":
+            last_human_idx = i
+
+    chunks: list[str] = []
+    for msg in messages[last_human_idx + 1 :]:
+        if not isinstance(msg, dict):
+            continue
+        mt = msg.get("type")
+        if mt == "tool":
+            if msg.get("name") == "ask_clarification":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                chunks.append(content)
+            continue
+        if mt == "ai":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                chunks.append(content)
+            elif isinstance(content, list):
+                parts: list[str] = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(str(block.get("text", "")))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                joined = "".join(parts)
+                if joined.strip():
+                    chunks.append(joined)
+
+    return "\n".join(chunks)
+
+
+def _feishu_url_scan_text(result: dict | list | None, response_text: str) -> str:
+    """Text blob to scan for image URLs: tool outputs + last-ai reply (deduped by concat)."""
+    from_tools = _collect_text_since_last_human_for_url_scan(result)
+    parts = [p for p in (from_tools, response_text) if isinstance(p, str) and p.strip()]
+    return "\n".join(parts)
+
+
 def _extract_text_content(content: Any) -> str:
     """Extract text from a streaming payload content field."""
     if isinstance(content, str):
@@ -234,6 +293,20 @@ def _extract_artifacts(result: dict | list) -> list[str]:
     else:
         return []
 
+    def _extract_outputs_paths_from_text(text: str) -> list[str]:
+        """Best-effort fallback when the agent forgets `present_files`.
+
+        We only accept `/mnt/user-data/outputs/*` paths, which remain subject to
+        `_resolve_attachments` security checks downstream.
+        """
+        import re
+
+        if not text:
+            return []
+        # Capture common output filenames; keep it conservative to avoid false positives.
+        pattern = re.compile(r"(/mnt/user-data/outputs/[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,6})")
+        return pattern.findall(text)
+
     artifacts: list[str] = []
     for msg in reversed(messages):
         if not isinstance(msg, dict):
@@ -249,6 +322,11 @@ def _extract_artifacts(result: dict | list) -> list[str]:
                     paths = args.get("filepaths", [])
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
+        # Fallback: tool output may include "saved /mnt/user-data/outputs/xxx.png"
+        if msg.get("type") == "tool":
+            content = msg.get("content", "")
+            if isinstance(content, str) and content:
+                artifacts.extend(_extract_outputs_paths_from_text(content))
     return artifacts
 
 
@@ -415,6 +493,16 @@ class ChannelManager:
 
         return assistant_id, run_config, run_context
 
+    def _feishu_auto_fetch_image_urls(self, msg: InboundMessage) -> bool:
+        """Whether to download image-like URLs from final text for Feishu upload."""
+        if msg.channel_name != "feishu":
+            return False
+        env_flag = os.environ.get("FEISHU_AUTO_FETCH_IMAGE_URLS", "").strip().lower()
+        if env_flag in ("0", "false", "no", "off"):
+            return False
+        layer = _as_dict(self._channel_sessions.get(msg.channel_name))
+        return bool(layer.get("auto_fetch_image_urls", True))
+
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
     def _get_client(self):
@@ -566,6 +654,13 @@ class ChannelManager:
         )
 
         response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+        url_scan_text = _feishu_url_scan_text(result, response_text)
+        attachments = await append_feishu_image_attachments_from_text(
+            msg.channel_name,
+            url_scan_text,
+            attachments,
+            enabled=self._feishu_auto_fetch_image_urls(msg),
+        )
 
         if not response_text:
             if attachments:
@@ -657,6 +752,13 @@ class ChannelManager:
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
             response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            url_scan_text = _feishu_url_scan_text(result, response_text)
+            attachments = await append_feishu_image_attachments_from_text(
+                msg.channel_name,
+                url_scan_text,
+                attachments,
+                enabled=self._feishu_auto_fetch_image_urls(msg),
+            )
 
             if not response_text:
                 if attachments:

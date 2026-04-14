@@ -82,15 +82,13 @@ def image_search_tool(
     type_image: str | None = None,
     layout: str | None = None,
 ) -> str:
-    """Search for images online. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
+    """Search for **existing** images on the web (e.g. DuckDuckGo).
 
-    **When to use:**
-    - Before generating character/portrait images: search for similar poses, expressions, styles
-    - Before generating specific objects/products: search for accurate visual references
-    - Before generating scenes/locations: search for architectural or environmental references
-    - Before generating fashion/clothing: search for style and detail references
+    For **reference or inspiration** only. **Not** a required step before text-to-image (文生图 / 画一张 / 生成一张图).
+    To **create** a new image from a text prompt, use the **z-image** skill (`Z_IMAGE_BASE_URL` + `/api/v1/generate`)
+    when it is in available skills. Call **image_search** when the user wants stock photos or you need real references.
 
-    The returned image URLs can be used as reference images in image generation to significantly improve quality.
+    **When to use:** optional thumbnails for style/accuracy; **not** for pure imaginative prompts covered by your image API.
 
     Args:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
