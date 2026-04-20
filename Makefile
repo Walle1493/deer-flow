@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
+.PHONY: help config config-upgrade check install test-model dev dev-daemon start stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway
 
 PYTHON ?= python3
 BASH ?= bash
@@ -15,6 +15,7 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
+	@echo "  make test-model      - Smoke-test chat model from config.yaml (optional: MODEL=name)"
 	@echo "  make install         - Install all dependencies (frontend + backend)"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
@@ -44,6 +45,10 @@ config-upgrade:
 # Check required tools
 check:
 	@$(PYTHON) ./scripts/check.py
+
+# Smoke-test configured LLM (same stack as runtime; WSL+intranet needs Windows forwarder on 127.0.0.1)
+test-model:
+	@cd backend && uv run python ../scripts/test_model_connection.py $(MODEL)
 
 # Install all dependencies
 install:

@@ -10,6 +10,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [API.md](API.md) | Complete API reference |
 | [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
 | [SETUP.md](SETUP.md) | Quick setup guide |
+| [WSL_MODEL_FORWARDING.md](WSL_MODEL_FORWARDING.md) | WSL, VPN/proxy, intranet LLM via Windows forwarder |
 
 ## Feature Documentation
 
@@ -42,6 +43,7 @@ docs/
 ├── ARCHITECTURE.md            # System architecture
 ├── API.md                     # API reference
 ├── CONFIGURATION.md           # Configuration guide
+├── WSL_MODEL_FORWARDING.md    # WSL + intranet model via Windows forwarder
 ├── SETUP.md                   # Setup instructions
 ├── FILE_UPLOAD.md             # File upload feature
 ├── PATH_EXAMPLES.md           # Path usage examples

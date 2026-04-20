@@ -40,6 +40,9 @@ models:
 - Codex CLI (`deerflow.models.openai_codex_provider:CodexChatModel`)
 - Any LangChain-compatible provider
 
+**WSL on Windows + intranet `base_url` (`10.x`)**  
+WSL often cannot reach the same LAN host Windows can, and a global HTTP proxy can break intranet calls. Use a **Windows-local forwarder** and set `base_url` to `http://127.0.0.1:<port>/v1`, or expand `NO_PROXY` for private ranges. See [WSL_MODEL_FORWARDING.md](WSL_MODEL_FORWARDING.md) and `scripts/test_model_connection.py`.
+
 CLI-backed provider examples:
 
 ```yaml
